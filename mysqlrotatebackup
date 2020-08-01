@@ -1,0 +1,245 @@
+#!/bin/bash
+
+#
+# mysql backup script
+# Tamar Klein <tamar@tamar-it.biz>
+#
+# The script should run with a privileged user:
+#   Either identified with unix socket (on localhost) or user's properties passed with extra configuration file
+#
+# Usage: mysqlrotatebackup -l backup_level [ -d backup_dir ] [ -h hostname ] [ -e extra_config_file ] [ dbname [ dbname .... ] ]
+#
+# levels for backup: hourly, daily, monthly, annual
+# the number tells how many backup would be stored for each level
+# the frequency of each level backup is determinated by the cron configuration
+hourly=
+daily=6
+weekly=4
+monthly=12
+annual=1
+
+level=
+mysql="/usr/bin/mysql"
+mysqldump="/usr/bin/mysqldump --single-transaction --skip-dump-date --lock-tables=false --events "
+rsync="/usr/bin/rsync"
+backupdir=/var/backup
+
+dbname=()
+
+function Usage {
+	echo "Error: $1"
+	echo
+	echo "Usage:"
+	echo "$0 -l backup_level [ -d backupdir ] [ -h hostname ] [ -e extra_config_file ] [ dbname [ dbname .... ] ]"
+	echo "Backup Levels:"
+	echo $'\t'hourly
+	echo $'\t'daily
+	echo $'\t'monthly
+	echo $'\t'annual
+	echo
+	exit -1
+}
+
+while test $# -gt 0
+do
+	value=$1
+	# Parsing ssh arguments: starts with '-'
+	if [[ ${value:0:1} == '-' ]]
+	then
+		case ${value:1:1} in
+		'h')
+		shift
+		mysql="${mysql} -h $1"
+		mysqldump="${mysqldump} -h $1"
+		;;
+		'e')
+		shift
+		mysql="${mysql} --defaults-extra-file=$1"
+		mysqldump="${mysqldump} --defaults-extra-file=$1"
+		;;
+		'd')
+		shift
+		backupdir=$1
+		;;
+		'l')
+		shift
+		level=$1
+		;;
+		*)
+			Usage "Unknown option $value"
+		esac
+	else
+		dbname=($dbname $value)
+	fi
+	shift
+done
+
+[[ -z $level ]] && Usage "Missing backup level"
+NUMBERS_RE='^[0-9]+$'
+function version_compare {
+        # return 0 for equal, 1 when the first bigger, 2 if the second bigger
+        [[ $1 == $2 ]] && return 0
+        local IFS=".-"
+        local first=($1) second=($2)
+        local i=0
+        local diff=0
+        while [[ $diff -eq 0 ]] && [[ $i -le ${#first[@]} ]] && [[ $i -le ${#second[@]} ]] && [[ ${first[i]} =~ $NUMBERS_RE ]] && [[ ${second[i]} =~ $NUMBERS_RE ]]
+        do
+                diff=$(( ${first[i]} - ${second[i]} ))
+                i=$(( $i + 1 ))
+        done
+        [[ $diff -eq 0 ]] && return 0 || ( [[ $diff -lt 0 ]] && return 2 || return 1 )
+}
+
+lockfile=$backupdir/.lock
+systemtype=$(uname)
+
+[[ ! -d $backupdir ]] && mkdir -p $backupdir
+lockfile_cmd=`which lockfile`
+if [[ $? -ne 0 ]] || [[ "${systemtype}" != "Linux" ]]
+then
+	if [ -f $lockfile ]
+	then
+		echo "It seems that $0 is running. Check the lock file $lockfile"
+                exit 1
+        fi
+	echo $$ > $lockfile
+else
+	if ${lockfile_cmd} -! -r 0 $lockfile
+	then
+		echo "It seems that $0 is running. Check the lock file $lockfile"
+		exit 1
+	fi
+fi
+
+eval c=\$$level
+[[  "$c" == "" ]] && Usage "No such level"
+
+baselevel=annual
+if [ -n "$hourly" ]
+then
+	baselevel=hourly
+elif [ -n "$daily" ]
+then
+	baselevel=daily
+elif [ -n "$weekly" ]
+then
+	baselevel=weekly
+elif [ -n "$monthly" ]
+then
+        baselevel=monthly
+fi
+
+function rotate_backups {
+	eval counter=\$$level
+	lastdir=$counter
+	if [ -n $counter ]
+	then
+		# In case the last directory within the level is present, it should be removed
+		# First - rename it temporarily using the PID
+		[[ -d ${backupdir}/$level.$counter ]] && mv ${backupdir}/$level.$counter ${backupdir}/.$$.$level.$lastdir
+		# rotate directories
+		while [ $counter -gt 0 ]
+		do
+			[[ -d ${backupdir}/$level.$(( $counter - 1 )) ]] && mv ${backupdir}/$level.$(( $counter - 1 )) ${backupdir}/$level.$counter
+			counter=$(( $counter - 1 ))
+		done
+		# remove the temporary directory created earlier
+		rm -rf ${backupdir}/.$$.$level.$lastdir &
+	fi
+
+	if [ $level != $baselevel ]
+	then
+		case $level in
+		'daily')
+			prevlevel=hourly
+		;;
+		'weekly')
+			prevlevel=daily
+		;;
+		'monthly')
+			prevlevel=weekly
+		;;
+		'annual')
+			prevlevel=monthly
+		;;
+		esac
+		eval prevlevel_level=\$$prevlevel
+		[[ -d ${backupdir}/$prevlevel.$(( $prevlevel_level - 1 )) ]] && mv ${backupdir}/$prevlevel.$(( $prevlevel_level - 1 )) ${backupdir}/$level.0
+	else
+		# copy the last backup to the new dir
+		[[ -d ${backupdir}/$level.1 ]] && cp -al ${backupdir}/$level.1 ${backupdir}/$level.0
+	fi
+}
+
+function dump_grants {
+# usage: dump_grant dbname filepath
+	if [ "$1" == "mysql" ] ; then
+	   USERS_TO_GRANT=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from db Where User != '' order by concat(\"'\",User,\"'@'\",Host,\"'\")"`
+	else USERS_TO_GRANT=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from db Where Db='$1' AND User != '' order by concat(\"'\",User,\"'@'\",Host,\"'\")"`
+	fi
+	if [ "$1" == "mysql" ] ; then
+	    TABLES_PRIV=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from tables_priv order by concat(\"'\",User,\"'@'\",Host,\"'\")"`
+	else TABLES_PRIV=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from tables_priv Where Db='$1' order by concat(\"'\",User,\"'@'\",Host,\"'\")"`
+	fi
+	for GRANT in $USERS_TO_GRANT; do
+		$mysql -r -N -B -e "show grants for $GRANT" | sed -e 's/\\//' | sed -e 's/$/;/' >> $2/grants.sql
+	done
+	for GRANT in $TABLES_PRIV; do
+		$mysql -r -N -B -e "show grants for $GRANT" | sed -e 's/\\//' | sed -e 's/$/;/' >> $2/grants.sql
+	done
+}
+
+function dump_dbs {
+	# Get mysql version
+	MYSQL_VERSION=( `$mysql -N -B -e 'SHOW VARIABLES LIKE "version"'` )
+	MYSQL_VERSION=${MYSQL_VERSION[1]}
+	version_compare 5.0.26 $MYSQL_VERSION
+	ver_comp=$?
+
+	backtick=$'`'
+	#dump DataBases
+	[[ $# -eq 0 ]] && DBS=( $($mysql -N -B -e "show databases where ${backtick}Database${backtick} not in ('information_schema', 'performance_schema', 'sys')") ) || DBS=$@
+	for DB in ${DBS[@]}; do
+	    #read tables
+	    TABLES=`$mysql -N -B -e "show tables from $DB"`
+	    [[ -z "$TABLES" ]] && continue
+	    logger "Dumping $DB"
+	    mkdir -p $DB
+	    for TABLE in $TABLES; do
+	        FILENAME="$DB/${TABLE}.sql"
+		if [[ $ver_comp -lt 2 ]]
+		then
+		        # if the mysql server version is lower than 5.0.26: remove command line parameters and manually remove the dump's date
+			${mysqldump%% *} $DB $TABLE | grep -v '\-\- Dump completed on' > $FILENAME
+		else
+		        #for mysql server 5.0.26 and up
+		        ${mysqldump} $DB $TABLE > $FILENAME
+		fi
+	        gzip -n $FILENAME
+	    done
+
+	    dump_grants $DB $DB
+
+	    chmod 0700 $DB
+	    chmod -R 0600 $DB/*
+
+	done
+}
+
+rotate_backups
+if [ $level == $baselevel ]
+then
+	mkdir /tmp/.$0.$$
+	cd /tmp/.$0.$$
+	logger "dump dbs"
+	dump_dbs ${dbanem[@]}
+	logger "syncing dbs"
+	$rsync -cr ./ ${backupdir}/$level.0/
+	cd -
+	rm -rf /tmp/.$0.$$
+	touch ${backupdir}/$level.0
+fi
+
+rm -f $lockfile
+exit 0

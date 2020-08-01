@@ -1,0 +1,121 @@
+#!/bin/bash
+
+#
+# mysql backup script
+# Tamar Klein <tamar@tamar-it.biz>
+# The script should run with a privileged user:
+#   Either identified with unix socket (on localhost) or user's properties passed with extra configuration file
+#
+# Usage: mysqlbackup [ -h hostname ] [ -e extra_config_file ] [ dbname [ dbname .... ] ]
+#
+
+mysql="/usr/bin/mysql"
+mysqldump="/usr/bin/mysqldump --single-transaction --skip-dump-date --lock-tables=false --events "
+
+dbname=()
+
+function Usage {
+	echo "Error: $1"
+	echo
+	echo "Usage:"
+	echo "$0 [ -h hostname ] [ -e extra_config_file ] [ dbname [ dbname .... ] ]"
+	echo
+	exit -1
+}
+
+
+while test $# -gt 0
+do
+	value=$1
+	# Parsing ssh arguments: starts with '-'
+	if [[ ${value:0:1} == '-' ]]
+	then
+		case ${value:1:1} in
+		'h')
+		shift
+		mysql="${mysql} -h $1"
+		mysqldump="${mysqldump} -h $1"
+		;;
+		'e')
+		shift
+		mysql="${mysql} --defaults-extra-file=$1"
+		mysqldump="${mysqldump} --defaults-extra-file=$1"
+		;;
+		*)
+			Usage "Unknown option $value"
+		esac
+	else
+		dbname=($dbname $value)
+	fi
+	shift
+done
+
+NUMBERS_RE='^[0-9]+$'
+function version_compare {
+        # return 0 for equal, 1 when the first bigger, 2 if the second bigger
+        [[ $1 == $2 ]] && return 0
+        local IFS=".-"
+        local first=($1) second=($2)
+        local i=0
+        local diff=0
+        while [[ $diff -eq 0 ]] && [[ $i -le ${#first[@]} ]] && [[ $i -le ${#second[@]} ]] && [[ ${first[i]} =~ $NUMBERS_RE ]] && [[ ${second[i]} =~ $NUMBERS_RE ]]
+        do
+                diff=$(( ${first[i]} - ${second[i]} ))
+                i=$(( $i + 1 ))
+        done
+        [[ $diff -eq 0 ]] && return 0 || ( [[ $diff -lt 0 ]] && return 2 || return 1 )
+}
+
+function dump_grants {
+# usage: dump_grant dbname filepath
+	if [ "$1" == "mysql" ] ; then
+	   USERS_TO_GRANT=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from db Where User != '' order by User"`
+	else USERS_TO_GRANT=`$mysql mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from db Where Db='$1' AND User != '' order by User"`
+	fi
+	if [ "$1" == "mysql" ] ; then
+	    TABLES_PRIV=`${mysql} mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from tables_priv order by User"`
+	else TABLES_PRIV=`${mysql} mysql -N -B -e "select distinct concat(\"'\",User,\"'@'\",Host,\"'\") from tables_priv Where Db='$1' order by User"`
+	fi
+    for GRANT in $USERS_TO_GRANT; do
+        ${mysql} -r -N -B -e "show grants for $GRANT" | sed -e 's/\\//' | sed -e 's/$/;/' >> $2/grants.sql
+    done
+    for GRANT in $TABLES_PRIV; do
+        ${mysql} -r -N -B -e "show grants for $GRANT" | sed -e 's/\\//' | sed -e 's/$/;/' >> $2/grants.sql
+    done
+}
+
+# Get mysql version
+MYSQL_VERSION=( `$mysql -N -B -e 'SHOW VARIABLES LIKE "version"'` )
+MYSQL_VERSION=${MYSQL_VERSION[1]}
+version_compare $MYSQL_VERSION 5.0.26
+ver_comp=$?
+
+backtick=$'`'
+#loop on required databases
+[[ ${#dbname[@]} -lt 1 ]] && dbname=(`$mysql -N -B -e "show databases where ${backtick}Database${backtick} not in ('information_schema', 'performance_schema', 'sys')"`)
+for DB in ${dbname[@]}; do
+    mkdir -p $DB
+    #read tables
+    TABLES=`$mysql -N -B -e "show tables from $DB"`
+    for TABLE in $TABLES; do
+        FILENAME="$DB/${TABLE}.sql"
+	# echo "$DB.$TABLE"
+	if [[ $ver_comp -lt 2 ]]
+	then
+	        # if the mysql server version is less then 5.0.26: remove command line parameters and manually remove the dump's date
+		${mysqldump%% *} $DB $TABLE | grep -v '\-\- Dump completed on' > $FILENAME
+	else
+	        #for mysql server 5.0.26 and up
+	        ${mysqldump} $DB $TABLE > $FILENAME
+	fi
+        gzip -n $FILENAME
+    done
+
+    dump_grants $DB $DB
+
+    chmod 0700 $DB
+    chmod -R 0600 $DB/*
+
+done
+
+exit 0
