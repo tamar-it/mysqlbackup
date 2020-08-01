@@ -1,5 +1,5 @@
 # mysqlbackup and mysqlrotatebackup
-Script for backup mysql databases
+Script for backup MySQL or MariaDB databases
 
 This repository contain two scripts:
 * mysqlbackup - regulary used with rsnapshot backup system
@@ -50,3 +50,12 @@ The dumps are stored in the same structure as for mysqlbackup, preceding with th
     table2.sql.gz
     grants.sql
 ```
+## About DB permissions and mysql extra configuration file
+User permissions are not passed with any command line parameters.
+When a privileged user is running the script, this user's cridencials are used.
+I suggest to run this script on the same host as mysql server, and use unix_socket authentication.
+If you must pass the user's password, do it using an extra configuration file, stored in a private place with limited permissions, or use the user's .my.cnf file for it.
+For further information refer to:
+Extra default file: https://dev.mysql.com/doc/refman/8.0/en/password-security-user.html
+Unix socket authentication in MariaDB: https://mariadb.com/kb/en/authentication-plugin-unix-socket/
+Unix socket authentication in MySQL: https://dev.mysql.com/doc/refman/8.0/en/socket-pluggable-authentication.html
