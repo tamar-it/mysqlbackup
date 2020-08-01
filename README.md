@@ -68,3 +68,4 @@ For further information refer to:
 * Extra default file: https://dev.mysql.com/doc/refman/8.0/en/password-security-user.html
 * Unix socket authentication in MariaDB: https://mariadb.com/kb/en/authentication-plugin-unix-socket/
 * Unix socket authentication in MySQL: https://dev.mysql.com/doc/refman/8.0/en/socket-pluggable-authentication.html
+* About mysqldump script and which permission the user need in order to use it: https://dev.mysql.com/doc/refman/8.0/en/mysqldump.html
