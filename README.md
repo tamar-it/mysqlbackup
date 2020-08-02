@@ -32,7 +32,7 @@ The backup levels are: hourly, daily, weekly, monthly and anual
 The number of backups stored for each level are hard-coded in the script and can be change. The current configuration is:
 no hourly backup, 6 daily backups, 4 weekly backups, 12 monthly backups and 1 anula backup.
 
-In order to save disk space, the content of the rotated directory is copied with hard link, and only changed files are copied. This won't work if the filesystem doesn't support hard links (like NFS filesystem).
+In order to save disk space, the content of the rotated directory is copied with hard link, and only changed files are copied. This won't work if the filesystem doesn't support hard links.
 
 The dumps are stored in the same structure as for mysqlbackup, preceding with the snapshot directory. for example:
 ```
